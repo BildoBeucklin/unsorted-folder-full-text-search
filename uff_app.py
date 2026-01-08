@@ -3,6 +3,9 @@ import os
 import sqlite3
 from pypdf import PdfReader
 
+# NEU: Für die Fuzzy-Logik
+from rapidfuzz import process, fuzz
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, 
                              QFileDialog, QTextBrowser, QProgressBar, QMessageBox,
@@ -10,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QDesktopServices
 
-# --- 1. DATENBANK MANAGER ---
+# --- 1. DATENBANK MANAGER (Mit Fuzzy-Ranking) ---
 
 class DatabaseHandler:
     def __init__(self, db_name="uff_index.db"):
@@ -58,35 +61,85 @@ class DatabaseHandler:
         return [r[0] for r in rows]
 
     def search(self, query):
+        if not query.strip(): return []
+        
         conn = sqlite3.connect(self.db_name)
-        safe_query = query.replace('"', '""')
+        
+        # 1. Versuch: Strikte Datenbank-Suche (Schnell)
+        words = query.replace('"', '').split()
+        # Wir suchen nach "Wort*" -> findet Wortanfänge
+        sql_query_parts = [f'"{w}"*' for w in words] 
+        sql_query_string = " OR ".join(sql_query_parts)
+        
         sql = """
-            SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15) 
+            SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15), content
             FROM documents 
             WHERE documents MATCH ? 
-            ORDER BY rank LIMIT 100
+            LIMIT 200 
         """
+        
         try:
-            results = conn.execute(sql, (f"{safe_query}*",)).fetchall()
+            rows = conn.execute(sql, (sql_query_string,)).fetchall()
         except:
-            results = []
+            rows = []
+        
+        # 2. Versuch (FALLBACK): Wenn DB nichts findet, laden wir ALLES
+        # Das ist der "Panic Mode" für starke Tippfehler (wie "vertraaag")
+        if len(rows) < 5: 
+            # Wir holen einfach mal die ersten 1000 Dokumente ohne Filter
+            fallback_sql = """
+                SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15), content
+                FROM documents 
+                LIMIT 1000
+            """
+            rows = conn.execute(fallback_sql).fetchall()
+        
         conn.close()
-        return results
 
-# --- 2. INDEXER (Mit Stop-Funktion) ---
+        # 3. Python Fuzzy Re-Ranking (RapidFuzz)
+        scored_results = []
+        
+        for filename, path, snippet, content in rows:
+            # Wir berechnen Scores
+            score_name = fuzz.partial_ratio(query.lower(), filename.lower())
+            
+            # Content-Check: Wir nehmen Content (falls snippet zu kurz ist)
+            # Begrenzung auf die ersten 5000 Zeichen für Performance
+            check_content = content[:5000] if content else ""
+            score_content = fuzz.partial_token_set_ratio(query.lower(), check_content.lower())
+            
+            final_score = max(score_name, score_content)
+            
+            # Bonus für exakte Wort-Treffer
+            if all(w.lower() in (filename + check_content).lower() for w in words):
+                final_score += 10
+            
+            # Filter: Nur anzeigen, wenn Score halbwegs okay ist
+            # Bei "vertraaag" vs "vertrag" ist der Score meist > 70
+            if final_score > 55:
+                scored_results.append({
+                    "score": final_score,
+                    "data": (filename, path, snippet)
+                })
+
+        # 4. Sortieren
+        scored_results.sort(key=lambda x: x["score"], reverse=True)
+
+        return [item["data"] for item in scored_results[:50]]
+
+# --- 2. INDEXER (Unverändert) ---
 
 class IndexerThread(QThread):
     progress_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(int, int, bool) # bool = Wurde abgebrochen?
+    finished_signal = pyqtSignal(int, int, bool)
 
     def __init__(self, folder_path, db_name="uff_index.db"):
         super().__init__()
         self.folder_path = folder_path
         self.db_name = db_name
-        self.is_running = True # Flag zum Steuern
+        self.is_running = True
 
     def stop(self):
-        """Setzt das Flag, damit der Loop stoppt."""
         self.is_running = False
 
     def _extract_text(self, filepath):
@@ -107,8 +160,6 @@ class IndexerThread(QThread):
 
     def run(self):
         conn = sqlite3.connect(self.db_name)
-        
-        # Alten Inhalt des Ordners löschen
         conn.execute("DELETE FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
         conn.commit()
 
@@ -117,13 +168,10 @@ class IndexerThread(QThread):
         was_cancelled = False
 
         for root, dirs, files in os.walk(self.folder_path):
-            # Check 1: Wurde Stop gedrückt?
             if not self.is_running:
                 was_cancelled = True
                 break
-                
             for file in files:
-                # Check 2: Auch innerhalb der Dateien prüfen für schnellere Reaktion
                 if not self.is_running:
                     was_cancelled = True
                     break
@@ -140,15 +188,13 @@ class IndexerThread(QThread):
                     indexed += 1
                 else:
                     skipped += 1
-            
-            if was_cancelled:
-                break
+            if was_cancelled: break
         
-        conn.commit() # Wir speichern, was wir bis zum Abbruch geschafft haben
+        conn.commit()
         conn.close()
         self.finished_signal.emit(indexed, skipped, was_cancelled)
 
-# --- 3. UI ---
+# --- 3. UI (Unverändert) ---
 
 class UffWindow(QMainWindow):
     def __init__(self):
@@ -159,14 +205,14 @@ class UffWindow(QMainWindow):
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Text Search v2.1")
+        self.setWindowTitle("UFF Text Search v3.0 (Fuzzy)")
         self.resize(1000, 700)
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
-        # --- LINKS ---
+        # LINKS
         left_panel = QFrame()
         left_panel.setFixedWidth(250)
         left_layout = QVBoxLayout(left_panel)
@@ -187,7 +233,6 @@ class UffWindow(QMainWindow):
         self.btn_rescan = QPushButton(" ↻ Neu scannen")
         self.btn_rescan.clicked.connect(self.rescan_selected_folder)
 
-        # Der neue Abbrechen-Button (Standardmäßig unsichtbar)
         self.btn_cancel = QPushButton("🛑 Abbrechen")
         self.btn_cancel.setStyleSheet("background-color: #ffcccc; color: #cc0000; font-weight: bold;")
         self.btn_cancel.clicked.connect(self.cancel_indexing)
@@ -197,17 +242,17 @@ class UffWindow(QMainWindow):
         left_layout.addWidget(self.folder_list)
         left_layout.addWidget(btn_add)
         left_layout.addWidget(btn_remove)
-        left_layout.addStretch() # Spacer
+        left_layout.addStretch()
         left_layout.addWidget(self.btn_rescan)
-        left_layout.addWidget(self.btn_cancel) # Wird eingeblendet beim Scan
+        left_layout.addWidget(self.btn_cancel)
 
-        # --- RECHTS ---
+        # RECHTS
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
         search_container = QHBoxLayout()
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("Suchbegriff eingeben...")
+        self.input_search.setPlaceholderText("Suchbegriff... (Fuzzy aktiv)")
         self.input_search.returnPressed.connect(self.perform_search)
         self.input_search.setStyleSheet("padding: 8px; font-size: 14px;")
         
@@ -240,8 +285,7 @@ class UffWindow(QMainWindow):
 
         main_layout.addWidget(splitter)
 
-    # --- LOGIK ---
-
+    # LOGIK
     def load_saved_folders(self):
         self.folder_list.clear()
         folders = self.db.get_folders()
@@ -263,7 +307,6 @@ class UffWindow(QMainWindow):
         item = self.folder_list.currentItem()
         if not item: return
         path = item.text()
-        
         if QMessageBox.question(self, "Löschen", f"Ordner entfernen?\n{path}", 
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.db.remove_folder(path)
@@ -281,7 +324,6 @@ class UffWindow(QMainWindow):
     def start_indexing(self, folder):
         self.set_ui_busy(True)
         self.lbl_status.setText(f"Starte... {os.path.basename(folder)}")
-        
         self.indexer_thread = IndexerThread(folder)
         self.indexer_thread.progress_signal.connect(lambda msg: self.lbl_status.setText(msg))
         self.indexer_thread.finished_signal.connect(self.indexing_finished)
@@ -289,27 +331,23 @@ class UffWindow(QMainWindow):
 
     def cancel_indexing(self):
         if self.indexer_thread and self.indexer_thread.isRunning():
-            self.lbl_status.setText("Breche ab... Bitte warten...")
+            self.lbl_status.setText("Breche ab...")
             self.indexer_thread.stop()
-            # Wir warten nicht auf den Thread hier (non-blocking), 
-            # das finished_signal kümmert sich um den Rest.
 
     def indexing_finished(self, indexed, skipped, was_cancelled):
         self.set_ui_busy(False)
         if was_cancelled:
             self.lbl_status.setText(f"Abgebrochen. ({indexed} indiziert).")
-            QMessageBox.information(self, "Abbruch", f"Vorgang vom Benutzer abgebrochen.\nBis dahin indiziert: {indexed}")
+            QMessageBox.information(self, "Abbruch", f"Vorgang abgebrochen.\nBis dahin indiziert: {indexed}")
         else:
             self.lbl_status.setText(f"Fertig. {indexed} neu, {skipped} übersprungen.")
             QMessageBox.information(self, "Fertig", f"Scan abgeschlossen!\n{indexed} Dateien im Index.")
 
     def set_ui_busy(self, busy):
-        # Steuert die Buttons während des Scans
         self.input_search.setEnabled(not busy)
         self.folder_list.setEnabled(not busy)
-        self.btn_rescan.setVisible(not busy)  # Rescan verstecken
-        self.btn_cancel.setVisible(busy)      # Abbrechen zeigen
-        
+        self.btn_rescan.setVisible(not busy)
+        self.btn_cancel.setVisible(busy)
         if busy:
             self.progress_bar.setRange(0, 0)
             self.progress_bar.show()
@@ -319,8 +357,10 @@ class UffWindow(QMainWindow):
     def perform_search(self):
         query = self.input_search.text()
         if not query: return
+        
+        # Suche ausführen (jetzt mit Fuzzy!)
         results = self.db.search(query)
-        self.lbl_status.setText(f"{len(results)} Treffer.")
+        self.lbl_status.setText(f"{len(results)} relevante Treffer.")
         
         html = ""
         if not results:
