@@ -3,11 +3,10 @@ import os
 import sqlite3
 import pdfplumber
 import numpy as np
-import zipfile  # WICHTIG: Für Zip-Dateien
-import io       # WICHTIG: Um Dateien im Arbeitsspeicher zu verarbeiten
+import zipfile  
+import io       
 from sentence_transformers import SentenceTransformer, util
 
-# Für die Fuzzy-Logik & Suche
 from rapidfuzz import process, fuzz
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -16,6 +15,40 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QListWidget, QListWidgetItem, QSplitter, QFrame)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QDesktopServices
+
+if os.name == 'nt':
+    base_dir = os.getenv('LOCALAPPDATA')
+else:
+    base_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
+
+log_dir = os.path.join(base_dir, "UFF_Search")
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+log_file_path = os.path.join(log_dir, "uff.log")
+
+# Logger-Klasse, die alles in die Datei schreibt
+class Logger(object):
+    def __init__(self):
+        self.log = open(log_file_path, "w", encoding="utf-8") # "w" überschreibt bei jedem Neustart
+
+    def write(self, message):
+        self.log.write(message)
+        self.log.flush()  # Sofort schreiben, damit nichts verloren geht
+
+    def flush(self):
+        self.log.flush()
+
+# stdout und stderr umleiten
+sys.stdout = Logger()
+sys.stderr = sys.stdout
+
+print(f"--- START LOGGING ---")
+print(f"Logfile liegt hier: {log_file_path}")
+
+# Font-Warnungen unterdrücken
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false;qt.text.fonts.db.warning=false"
+
 
 # --- 1. DATENBANK MANAGER (Mit Hybrid Search Scoring) ---
 

@@ -37,7 +37,7 @@ To run the application from the source code, you'll need Python 3 and the follow
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/unsorted-folder-full-text-search.git
+    git clone https://github.com/BildoBeucklin/unsorted-folder-full-text-search.git
     cd unsorted-folder-full-text-search
     ```
     *(Note: You might need to update the repository URL)*
