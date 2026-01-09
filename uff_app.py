@@ -3,9 +3,11 @@ import os
 import sqlite3
 import pdfplumber
 import numpy as np
+import zipfile  # WICHTIG: Für Zip-Dateien
+import io       # WICHTIG: Um Dateien im Arbeitsspeicher zu verarbeiten
 from sentence_transformers import SentenceTransformer, util
 
-# NEU: Für die Fuzzy-Logik
+# Für die Fuzzy-Logik & Suche
 from rapidfuzz import process, fuzz
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -15,32 +17,24 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QDesktopServices
 
-# --- 1. DATENBANK MANAGER (Mit Semantischer Suche) ---
+# --- 1. DATENBANK MANAGER (Mit Hybrid Search Scoring) ---
 
 class DatabaseHandler:
     def __init__(self):
-        # ... (same as before)
         if os.name == 'nt':
             base_dir = os.getenv('LOCALAPPDATA')
         else:
-            # Mac/Linux: ~/.local/share/uff_search
             base_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
 
-        # 2. Wir erstellen unseren eigenen Unterordner
         self.app_data_dir = os.path.join(base_dir, "UFF_Search")
         
-        # Falls der Ordner nicht existiert, erstellen wir ihn
         if not os.path.exists(self.app_data_dir):
             os.makedirs(self.app_data_dir)
 
-        # 3. Der Pfad zur Datenbank
         self.db_name = os.path.join(self.app_data_dir, "uff_index.db")
         
-        # Debug-Info (falls du es im Terminal testest)
         print(f"Datenbank Pfad: {self.db_name}")
 
-        # 4. Semantisches Modell laden
-        # Wir geben dem User Feedback, weil das dauern kann
         print("Lade das semantische Modell (all-MiniLM-L6-v2)...")
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         print("Modell geladen.")
@@ -62,7 +56,7 @@ class DatabaseHandler:
                 alias TEXT
             );
         """)
-        # NEU: Tabelle für die Vektor-Embeddings
+        # Tabelle für die Vektor-Embeddings
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS embeddings (
                 doc_id INTEGER PRIMARY KEY,
@@ -86,16 +80,13 @@ class DatabaseHandler:
     def remove_folder(self, path):
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
-        # Finde alle doc_ids, die zu dem Ordner gehören
         cursor.execute("SELECT rowid FROM documents WHERE path LIKE ?", (f"{path}%",))
         ids_to_delete = [row[0] for row in cursor.fetchall()]
         
         if ids_to_delete:
-            # Lösche Einträge aus 'documents' und 'embeddings'
             cursor.execute("DELETE FROM documents WHERE path LIKE ?", (f"{path}%",))
             cursor.execute(f"DELETE FROM embeddings WHERE doc_id IN ({','.join('?'*len(ids_to_delete))})", ids_to_delete)
 
-        # Lösche den Ordner-Eintrag selbst
         cursor.execute("DELETE FROM folders WHERE path = ?", (path,))
         conn.commit()
         conn.close()
@@ -109,7 +100,7 @@ class DatabaseHandler:
     def search(self, query):
         if not query.strip(): return []
         
-        # --- PHASE 1: SEMANTISCHE SUCHE ---
+        # --- PHASE 1: SEMANTISCHE SUCHE (Vektor) ---
         query_embedding = self.model.encode(query, convert_to_tensor=False)
         
         conn = sqlite3.connect(self.db_name)
@@ -120,82 +111,88 @@ class DatabaseHandler:
         
         doc_ids = [item[0] for item in all_embeddings_data]
         
-        # Konvertiere BLOBs zurück zu Vektoren
+        if not doc_ids:
+            conn.close()
+            return []
+
+        # BLOBs zurück zu Vektoren
         all_embeddings = np.array([np.frombuffer(item[1], dtype=np.float32) for item in all_embeddings_data])
         
-        # Cosine Similarity berechnen
-        semantic_scores = {}
-        if len(all_embeddings) > 0:
-            cos_scores = util.cos_sim(query_embedding, all_embeddings)[0].numpy()
-            
-            for i, score in enumerate(cos_scores):
-                # Nur relevante Ergebnisse (>35% Ähnlichkeit) berücksichtigen
-                if score > 0.35:
-                    # Wir gewichten die semantische Suche hoch (z.B. max 100 Pkt)
-                    semantic_scores[doc_ids[i]] = float(score) * 100
+        # Cosine Similarity (Werte zwischen -1 und 1)
+        # clip auf 0, da negative Werte hier irrelevant sind
+        cos_scores = util.cos_sim(query_embedding, all_embeddings)[0].numpy()
+        cos_scores = np.clip(cos_scores, 0, 1) 
+        
+        # Map: doc_id -> Semantic Score (0.0 - 1.0)
+        semantic_map = {doc_id: float(score) for doc_id, score in zip(doc_ids, cos_scores)}
 
-        # --- PHASE 2: STICHWORTSUCHE (FTS) ---
+        # --- PHASE 2: STICHWORTSUCHE (FTS & Fuzzy) ---
         words = query.replace('"', '').split()
+        if not words: words = [query]
+        
         sql_query_parts = [f'"{w}"*' for w in words]
         sql_query_string = " OR ".join(sql_query_parts)
         
-        sql = """
-            SELECT rowid, filename, path, content
-            FROM documents 
-            WHERE documents MATCH ? 
-            LIMIT 200
-        """
         try:
-            fts_rows = cursor.execute(sql, (sql_query_string,)).fetchall()
+            # Wir holen Kandidaten, die die Wörter enthalten
+            fts_rows = cursor.execute("""
+                SELECT rowid, filename, content 
+                FROM documents 
+                WHERE documents MATCH ? 
+                LIMIT 100
+            """, (sql_query_string,)).fetchall()
         except:
             fts_rows = []
 
-        # --- PHASE 3: KOMBINATION & BEWERTUNG ---
-        combined_scores = {}
-
-        # Scores aus der semantischen Suche übernehmen
-        for doc_id, score in semantic_scores.items():
-            combined_scores[doc_id] = score
-
-        # Scores aus der FTS-Suche hinzufügen/kombinieren
-        for doc_id, filename, path, content in fts_rows:
-            # Fuzzy-Score für Relevanz
-            score_name = fuzz.WRatio(query.lower(), filename.lower())
-            check_content = content[:5000] if content else ""
-            score_content = fuzz.partial_token_set_ratio(query.lower(), check_content.lower())
-            fuzzy_score = (score_name * 0.2) + (score_content * 0.8)
-
-            # Bonus für exakte Wort-Treffer
-            if all(w.lower() in (filename + check_content).lower() for w in words):
-                fuzzy_score += 20
+        lexical_map = {}
+        
+        for doc_id, filename, content in fts_rows:
+            # Fuzzy-Score berechnen (0 bis 100) -> normalisieren auf 0.0 - 1.0
+            ratio_name = fuzz.partial_ratio(query.lower(), filename.lower())
+            ratio_content = fuzz.partial_token_set_ratio(query.lower(), content[:5000].lower())
             
-            # Wenn das Dokument bereits durch die semantische Suche gefunden wurde,
-            # geben wir einen massiven Bonus. Ansonsten normaler Score.
-            if doc_id in combined_scores:
-                combined_scores[doc_id] += fuzzy_score + 50 # Bonus!
-            else:
-                combined_scores[doc_id] = fuzzy_score
+            best_ratio = max(ratio_name, ratio_content)
+            lexical_map[doc_id] = best_ratio / 100.0
+
+        # --- PHASE 3: HYBRID FUSION (Kombination) ---
+        final_scores = {}
         
-        # --- PHASE 4: SORTIEREN & ERGEBNISSE HOLEN ---
-        # Sortiere die doc_ids nach dem höchsten Score
-        sorted_doc_ids = sorted(combined_scores.keys(), key=lambda doc_id: combined_scores[doc_id], reverse=True)
+        # Gewichtung anpassen
+        ALPHA = 0.65  # 65% Semantik
+        BETA = 0.35   # 35% Stichwort
+
+        for doc_id, sem_score in semantic_map.items():
+            # Filter: Nur Ergebnisse mit minimaler Relevanz betrachten
+            if sem_score < 0.15 and doc_id not in lexical_map:
+                continue
+
+            lex_score = lexical_map.get(doc_id, 0.0)
+            
+            # Hybrid Score
+            hybrid_score = (sem_score * ALPHA) + (lex_score * BETA)
+            
+            # Bonus: Wenn beides hoch ist (Semantik UND Keyword)
+            if sem_score > 0.4 and lex_score > 0.6:
+                hybrid_score += 0.1
+                
+            final_scores[doc_id] = hybrid_score
+
+        # --- PHASE 4: SORTIEREN & AUSGEBEN ---
+        sorted_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
         
-        # Top 50 Ergebnisse
-        final_results = []
-        for doc_id in sorted_doc_ids[:50]:
-            # Holen der Metadaten für die Anzeige
-            res = cursor.execute(
+        results = []
+        for doc_id in sorted_ids[:50]: # Top 50 Ergebnisse
+            row = cursor.execute(
                 "SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15) FROM documents WHERE rowid = ?", 
                 (doc_id,)
             ).fetchone()
-            
-            if res:
-                final_results.append(res)
+            if row:
+                results.append(row)
         
         conn.close()
-        return final_results
+        return results
 
-# --- 2. INDEXER (Unverändert) ---
+# --- 2. INDEXER (Mit ZIP Support & Recursion) ---
 
 class IndexerThread(QThread):
     progress_signal = pyqtSignal(str)
@@ -211,33 +208,62 @@ class IndexerThread(QThread):
     def stop(self):
         self.is_running = False
 
-    def _extract_text(self, filepath):
-        ext = os.path.splitext(filepath)[1].lower()
+    def _extract_text_from_stream(self, file_stream, filename):
+        """
+        Liest Text aus einem Dateiobjekt (Stream) oder Pfad, basierend auf der Endung.
+        Robuster gegen defekte PDF-Seiten.
+        """
+        ext = os.path.splitext(filename)[1].lower()
+        text = ""
+
         try:
             if ext == ".pdf":
-                with pdfplumber.open(filepath) as pdf:
-                    text = ""
-                    for page in pdf.pages:
-                        if page_text := page.extract_text():
-                            text += page_text + "\n"
-                    return text
+                # pdfplumber kann direkt Dateiobjekte (BytesIO) lesen
+                try:
+                    with pdfplumber.open(file_stream) as pdf:
+                        for page in pdf.pages:
+                            try:
+                                # Versuch, Text von der einzelnen Seite zu holen
+                                if page_text := page.extract_text():
+                                    text += page_text + "\n"
+                            except Exception as e:
+                                # Wenn eine Seite defekt ist (z.B. FontBBox Fehler), überspringen wir nur diese Seite
+                                print(f"Warnung: Konnte eine Seite in '{filename}' nicht lesen (übersprungen). Fehler: {e}")
+                                continue
+                except Exception as e:
+                    # Wenn die ganze PDF nicht geöffnet werden kann
+                    print(f"Warnung: PDF '{filename}' konnte nicht geöffnet werden. Fehler: {e}")
+                    return None
+            
             elif ext in [".txt", ".md", ".py", ".json", ".csv", ".html", ".log", ".ini", ".xml"]:
-                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
+                # Wir lesen die Bytes und decodieren sie
+                if hasattr(file_stream, 'read'):
+                    content_bytes = file_stream.read()
+                    if isinstance(content_bytes, str): 
+                        # Fallback
+                        with open(file_stream, 'r', encoding='utf-8', errors='ignore') as f:
+                            text = f.read()
+                    else:
+                        text = content_bytes.decode('utf-8', errors='ignore')
+                else:
+                    # Echter Dateipfad
+                    with open(file_stream, "r", encoding="utf-8", errors="ignore") as f:
+                        text = f.read()
+        except Exception as e:
+            # Allgemeiner Fehler beim Lesen
+            # print(f"Lese-Fehler bei {filename}: {e}")
             return None
-        except:
-            return None
+            
+        return text
 
     def run(self):
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        # Finde alle doc_ids, die zu dem Ordner gehören, um sie später zu löschen
+        # Bereinigen alter Einträge
         cursor.execute("SELECT rowid FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
         ids_to_delete = [row[0] for row in cursor.fetchall()]
-        
         if ids_to_delete:
-            # Lösche alte Einträge aus 'documents' und 'embeddings'
             cursor.execute("DELETE FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
             cursor.execute(f"DELETE FROM embeddings WHERE doc_id IN ({','.join('?'*len(ids_to_delete))})", ids_to_delete)
             conn.commit()
@@ -246,42 +272,72 @@ class IndexerThread(QThread):
         skipped = 0
         was_cancelled = False
 
+        # --- REKURSIVES DURCHSUCHEN ---
         for root, dirs, files in os.walk(self.folder_path):
             if not self.is_running:
                 was_cancelled = True
                 break
+            
             for file in files:
                 if not self.is_running:
                     was_cancelled = True
                     break
 
-                self.progress_signal.emit(f"Lese: {file}...")
-                path = os.path.join(root, file)
-                content = self._extract_text(path)
-                
-                if content and len(content.strip()) > 0:
-                    # 1. In FTS-Tabelle einfügen
-                    cursor.execute(
-                        "INSERT INTO documents (filename, path, content) VALUES (?, ?, ?)", 
-                        (file, path, content)
-                    )
-                    doc_id = cursor.lastrowid
-                    
-                    # 2. Embedding erstellen und in BLOB umwandeln
-                    embedding = self.model.encode(content[:8192], convert_to_tensor=False)
-                    embedding_blob = embedding.tobytes()
-                    
-                    # 3. Embedding in Tabelle einfügen
-                    cursor.execute("INSERT INTO embeddings (doc_id, vec) VALUES (?, ?)", (doc_id, embedding_blob))
-                    
-                    indexed += 1
+                file_path = os.path.join(root, file)
+                self.progress_signal.emit(f"Prüfe: {file}...")
+
+                # A. ZIP-DATEIEN BEHANDELN
+                if file.lower().endswith('.zip'):
+                    try:
+                        with zipfile.ZipFile(file_path, 'r') as z:
+                            for z_info in z.infolist():
+                                if z_info.is_dir(): continue
+                                
+                                # Virtueller Pfad: C:\Ordner\Archiv.zip :: innen/datei.txt
+                                virtual_path = f"{file_path} :: {z_info.filename}"
+                                
+                                with z.open(z_info) as z_file:
+                                    # Inhalt in RAM laden (BytesIO)
+                                    file_in_memory = io.BytesIO(z_file.read())
+                                    
+                                    content = self._extract_text_from_stream(file_in_memory, z_info.filename)
+                                    
+                                    if content and len(content.strip()) > 20:
+                                        self._save_to_db(cursor, z_info.filename, virtual_path, content)
+                                        indexed += 1
+                    except Exception as e:
+                        print(f"Zip Error {file}: {e}")
+                        skipped += 1
+
+                # B. NORMALE DATEIEN
                 else:
-                    skipped += 1
+                    content = self._extract_text_from_stream(file_path, file)
+                    if content and len(content.strip()) > 20:
+                        self._save_to_db(cursor, file, file_path, content)
+                        indexed += 1
+                    else:
+                        skipped += 1
+
             if was_cancelled: break
         
         conn.commit()
         conn.close()
         self.finished_signal.emit(indexed, skipped, was_cancelled)
+
+    def _save_to_db(self, cursor, filename, path, content):
+        # 1. Text speichern
+        cursor.execute(
+            "INSERT INTO documents (filename, path, content) VALUES (?, ?, ?)", 
+            (filename, path, content)
+        )
+        doc_id = cursor.lastrowid
+        
+        # 2. Embedding erstellen (Max 8000 chars)
+        embedding = self.model.encode(content[:8000], convert_to_tensor=False)
+        embedding_blob = embedding.tobytes()
+        
+        # 3. Vektor speichern
+        cursor.execute("INSERT INTO embeddings (doc_id, vec) VALUES (?, ?)", (doc_id, embedding_blob))
 
 # --- 3. UI (Unverändert) ---
 
@@ -294,14 +350,13 @@ class UffWindow(QMainWindow):
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Text Search v4.0 (Semantic)")
+        self.setWindowTitle("UFF Text Search v5.0 (Hybrid Zip)")
         self.resize(1000, 700)
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
-        # ... (UI initialisation remains the same)
         # LINKS
         left_panel = QFrame()
         left_panel.setFixedWidth(250)
@@ -342,7 +397,7 @@ class UffWindow(QMainWindow):
 
         search_container = QHBoxLayout()
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("Suchbegriff... (Semantische Suche aktiv)")
+        self.input_search.setPlaceholderText("Suche... (Hybrid: Inhalt + Keywords)")
         self.input_search.returnPressed.connect(self.perform_search)
         self.input_search.setStyleSheet("padding: 8px; font-size: 14px;")
         
@@ -353,7 +408,7 @@ class UffWindow(QMainWindow):
         search_container.addWidget(self.input_search)
         search_container.addWidget(btn_go)
 
-        self.lbl_status = QLabel("Bereit. Semantisches Modell geladen.")
+        self.lbl_status = QLabel("Bereit. Hybrid-Modell geladen.")
         self.lbl_status.setStyleSheet("color: #666;")
         self.progress_bar = QProgressBar()
         self.progress_bar.hide()
@@ -374,8 +429,6 @@ class UffWindow(QMainWindow):
         splitter.setSizes([250, 750])
 
         main_layout.addWidget(splitter)
-    
-    # ... (Rest of UI Class)
 
     # LOGIK
     def load_saved_folders(self):
@@ -417,7 +470,6 @@ class UffWindow(QMainWindow):
         self.set_ui_busy(True)
         self.lbl_status.setText(f"Starte... {os.path.basename(folder)}")
         
-        # Dem Thread jetzt das Modell mitgeben
         self.indexer_thread = IndexerThread(folder, db_name=self.db.db_name, model=self.db.model)
         
         self.indexer_thread.progress_signal.connect(lambda msg: self.lbl_status.setText(msg))
@@ -453,7 +505,9 @@ class UffWindow(QMainWindow):
         query = self.input_search.text()
         if not query: return
         
-        # Suche ausführen (jetzt mit Fuzzy!)
+        self.lbl_status.setText("Suche läuft...")
+        QApplication.processEvents()
+
         results = self.db.search(query)
         self.lbl_status.setText(f"{len(results)} relevante Treffer.")
         
@@ -462,14 +516,24 @@ class UffWindow(QMainWindow):
             html = "<h3 style='color: gray; text-align: center; margin-top: 20px;'>Nichts gefunden.</h3>"
         
         for filename, filepath, snippet in results:
-            file_url = QUrl.fromLocalFile(filepath).toString()
+            # Falls es eine Datei im Zip ist, müssen wir den Link anpassen,
+            # damit er zumindest das Zip öffnet.
+            if " :: " in filepath:
+                real_path = filepath.split(" :: ")[0]
+                display_path = filepath # Zeige den virtuellen Pfad
+            else:
+                real_path = filepath
+                display_path = filepath
+            
+            file_url = QUrl.fromLocalFile(real_path).toString()
+            
             html += f"""
             <div style='margin-bottom: 10px; padding: 10px; background-color: #f9f9f9; border-left: 4px solid #2980b9;'>
                 <a href="{file_url}" style='font-size: 16px; font-weight: bold; color: #2980b9; text-decoration: none;'>
                     {filename}
                 </a>
                 <div style='color: #333; margin-top: 5px; font-family: sans-serif; font-size: 13px;'>{snippet}</div>
-                <div style='color: #999; font-size: 11px; margin-top: 4px;'>{filepath}</div>
+                <div style='color: #999; font-size: 11px; margin-top: 4px;'>{display_path}</div>
             </div>
             """
         self.result_browser.setHtml(html)
