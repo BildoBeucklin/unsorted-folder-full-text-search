@@ -1,3 +1,5 @@
+![UFF Banner](assets/uff_banner.jpeg)
+
 # UFF Search
 
 UFF Search is a desktop application for Windows that allows you to perform fast, fuzzy full-text searches on your local files.
