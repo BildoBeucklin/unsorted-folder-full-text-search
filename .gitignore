@@ -1,2 +1,5 @@
 .venv
 *.db
+/dist
+/build
+__pycache__/

@@ -16,8 +16,28 @@ from PyQt6.QtGui import QDesktopServices
 # --- 1. DATENBANK MANAGER (Mit Fuzzy-Ranking) ---
 
 class DatabaseHandler:
-    def __init__(self, db_name="uff_index.db"):
-        self.db_name = db_name
+    def __init__(self):
+        # 1. Wir ermitteln den korrekten AppData Ordner für den User
+        # Windows: C:\Users\Name\AppData\Local\UFF_Search
+        if os.name == 'nt':
+            base_dir = os.getenv('LOCALAPPDATA')
+        else:
+            # Mac/Linux: ~/.local/share/uff_search
+            base_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
+
+        # 2. Wir erstellen unseren eigenen Unterordner
+        self.app_data_dir = os.path.join(base_dir, "UFF_Search")
+        
+        # Falls der Ordner nicht existiert, erstellen wir ihn
+        if not os.path.exists(self.app_data_dir):
+            os.makedirs(self.app_data_dir)
+
+        # 3. Der Pfad zur Datenbank
+        self.db_name = os.path.join(self.app_data_dir, "uff_index.db")
+        
+        # Debug-Info (falls du es im Terminal testest)
+        print(f"Datenbank Pfad: {self.db_name}")
+
         self.init_db()
 
     def init_db(self):
@@ -324,7 +344,12 @@ class UffWindow(QMainWindow):
     def start_indexing(self, folder):
         self.set_ui_busy(True)
         self.lbl_status.setText(f"Starte... {os.path.basename(folder)}")
-        self.indexer_thread = IndexerThread(folder)
+        
+        # HIER WAR DER FEHLER:
+        # Wir müssen dem Thread explizit sagen, wo die Datenbank liegt!
+        # self.db.db_name enthält den korrekten Pfad (C:\Users\...\AppData\...)
+        self.indexer_thread = IndexerThread(folder, db_name=self.db.db_name)
+        
         self.indexer_thread.progress_signal.connect(lambda msg: self.lbl_status.setText(msg))
         self.indexer_thread.finished_signal.connect(self.indexing_finished)
         self.indexer_thread.start()
