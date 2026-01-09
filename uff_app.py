@@ -1,7 +1,7 @@
 import sys
 import os
 import sqlite3
-from pypdf import PdfReader
+import pdfplumber
 
 # NEU: Für die Fuzzy-Logik
 from rapidfuzz import process, fuzz
@@ -120,19 +120,20 @@ class DatabaseHandler:
         scored_results = []
         
         for filename, path, snippet, content in rows:
-            # Wir berechnen Scores
-            score_name = fuzz.partial_ratio(query.lower(), filename.lower())
+            # Wir berechnen Scores mit besserer Gewichtung
+            score_name = fuzz.WRatio(query.lower(), filename.lower())
             
             # Content-Check: Wir nehmen Content (falls snippet zu kurz ist)
             # Begrenzung auf die ersten 5000 Zeichen für Performance
             check_content = content[:5000] if content else ""
             score_content = fuzz.partial_token_set_ratio(query.lower(), check_content.lower())
             
-            final_score = max(score_name, score_content)
+            # Gewichteter Durchschnitt: Inhalt ist wichtiger als Dateiname
+            final_score = (score_name * 0.2) + (score_content * 0.8)
             
-            # Bonus für exakte Wort-Treffer
+            # Bonus für exakte Wort-Treffer (jetzt stärker)
             if all(w.lower() in (filename + check_content).lower() for w in words):
-                final_score += 10
+                final_score += 20
             
             # Filter: Nur anzeigen, wenn Score halbwegs okay ist
             # Bei "vertraaag" vs "vertrag" ist der Score meist > 70
@@ -166,11 +167,12 @@ class IndexerThread(QThread):
         ext = os.path.splitext(filepath)[1].lower()
         try:
             if ext == ".pdf":
-                reader = PdfReader(filepath)
-                text = ""
-                for page in reader.pages:
-                    if page_text := page.extract_text(): text += page_text + "\n"
-                return text
+                with pdfplumber.open(filepath) as pdf:
+                    text = ""
+                    for page in pdf.pages:
+                        if page_text := page.extract_text():
+                            text += page_text + "\n"
+                    return text
             elif ext in [".txt", ".md", ".py", ".json", ".csv", ".html", ".log", ".ini", ".xml"]:
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     return f.read()

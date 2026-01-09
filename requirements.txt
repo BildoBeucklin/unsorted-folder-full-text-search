@@ -1,3 +1,4 @@
-pypdf
+pdfplumber
+pdfminer.six
 rapidfuzz
 PyQt6
