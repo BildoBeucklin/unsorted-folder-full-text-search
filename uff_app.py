@@ -2,6 +2,8 @@ import sys
 import os
 import sqlite3
 import pdfplumber
+import numpy as np
+from sentence_transformers import SentenceTransformer, util
 
 # NEU: Für die Fuzzy-Logik
 from rapidfuzz import process, fuzz
@@ -13,12 +15,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QDesktopServices
 
-# --- 1. DATENBANK MANAGER (Mit Fuzzy-Ranking) ---
+# --- 1. DATENBANK MANAGER (Mit Semantischer Suche) ---
 
 class DatabaseHandler:
     def __init__(self):
-        # 1. Wir ermitteln den korrekten AppData Ordner für den User
-        # Windows: C:\Users\Name\AppData\Local\UFF_Search
+        # ... (same as before)
         if os.name == 'nt':
             base_dir = os.getenv('LOCALAPPDATA')
         else:
@@ -38,19 +39,34 @@ class DatabaseHandler:
         # Debug-Info (falls du es im Terminal testest)
         print(f"Datenbank Pfad: {self.db_name}")
 
+        # 4. Semantisches Modell laden
+        # Wir geben dem User Feedback, weil das dauern kann
+        print("Lade das semantische Modell (all-MiniLM-L6-v2)...")
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("Modell geladen.")
+
         self.init_db()
 
     def init_db(self):
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
+        # FTS-Tabelle für die Stichwortsuche
         cursor.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS documents 
             USING fts5(filename, path, content);
         """)
+        # Tabelle für die Ordner
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS folders (
                 path TEXT PRIMARY KEY,
                 alias TEXT
+            );
+        """)
+        # NEU: Tabelle für die Vektor-Embeddings
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS embeddings (
+                doc_id INTEGER PRIMARY KEY,
+                vec BLOB
             );
         """)
         conn.commit()
@@ -69,8 +85,18 @@ class DatabaseHandler:
 
     def remove_folder(self, path):
         conn = sqlite3.connect(self.db_name)
-        conn.execute("DELETE FROM folders WHERE path = ?", (path,))
-        conn.execute("DELETE FROM documents WHERE path LIKE ?", (f"{path}%",))
+        cursor = conn.cursor()
+        # Finde alle doc_ids, die zu dem Ordner gehören
+        cursor.execute("SELECT rowid FROM documents WHERE path LIKE ?", (f"{path}%",))
+        ids_to_delete = [row[0] for row in cursor.fetchall()]
+        
+        if ids_to_delete:
+            # Lösche Einträge aus 'documents' und 'embeddings'
+            cursor.execute("DELETE FROM documents WHERE path LIKE ?", (f"{path}%",))
+            cursor.execute(f"DELETE FROM embeddings WHERE doc_id IN ({','.join('?'*len(ids_to_delete))})", ids_to_delete)
+
+        # Lösche den Ordner-Eintrag selbst
+        cursor.execute("DELETE FROM folders WHERE path = ?", (path,))
         conn.commit()
         conn.close()
 
@@ -83,70 +109,91 @@ class DatabaseHandler:
     def search(self, query):
         if not query.strip(): return []
         
-        conn = sqlite3.connect(self.db_name)
+        # --- PHASE 1: SEMANTISCHE SUCHE ---
+        query_embedding = self.model.encode(query, convert_to_tensor=False)
         
-        # 1. Versuch: Strikte Datenbank-Suche (Schnell)
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT doc_id, vec FROM embeddings")
+        all_embeddings_data = cursor.fetchall()
+        
+        doc_ids = [item[0] for item in all_embeddings_data]
+        
+        # Konvertiere BLOBs zurück zu Vektoren
+        all_embeddings = np.array([np.frombuffer(item[1], dtype=np.float32) for item in all_embeddings_data])
+        
+        # Cosine Similarity berechnen
+        semantic_scores = {}
+        if len(all_embeddings) > 0:
+            cos_scores = util.cos_sim(query_embedding, all_embeddings)[0].numpy()
+            
+            for i, score in enumerate(cos_scores):
+                # Nur relevante Ergebnisse (>35% Ähnlichkeit) berücksichtigen
+                if score > 0.35:
+                    # Wir gewichten die semantische Suche hoch (z.B. max 100 Pkt)
+                    semantic_scores[doc_ids[i]] = float(score) * 100
+
+        # --- PHASE 2: STICHWORTSUCHE (FTS) ---
         words = query.replace('"', '').split()
-        # Wir suchen nach "Wort*" -> findet Wortanfänge
-        sql_query_parts = [f'"{w}"*' for w in words] 
+        sql_query_parts = [f'"{w}"*' for w in words]
         sql_query_string = " OR ".join(sql_query_parts)
         
         sql = """
-            SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15), content
+            SELECT rowid, filename, path, content
             FROM documents 
             WHERE documents MATCH ? 
-            LIMIT 200 
+            LIMIT 200
         """
-        
         try:
-            rows = conn.execute(sql, (sql_query_string,)).fetchall()
+            fts_rows = cursor.execute(sql, (sql_query_string,)).fetchall()
         except:
-            rows = []
-        
-        # 2. Versuch (FALLBACK): Wenn DB nichts findet, laden wir ALLES
-        # Das ist der "Panic Mode" für starke Tippfehler (wie "vertraaag")
-        if len(rows) < 5: 
-            # Wir holen einfach mal die ersten 1000 Dokumente ohne Filter
-            fallback_sql = """
-                SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15), content
-                FROM documents 
-                LIMIT 1000
-            """
-            rows = conn.execute(fallback_sql).fetchall()
-        
-        conn.close()
+            fts_rows = []
 
-        # 3. Python Fuzzy Re-Ranking (RapidFuzz)
-        scored_results = []
-        
-        for filename, path, snippet, content in rows:
-            # Wir berechnen Scores mit besserer Gewichtung
+        # --- PHASE 3: KOMBINATION & BEWERTUNG ---
+        combined_scores = {}
+
+        # Scores aus der semantischen Suche übernehmen
+        for doc_id, score in semantic_scores.items():
+            combined_scores[doc_id] = score
+
+        # Scores aus der FTS-Suche hinzufügen/kombinieren
+        for doc_id, filename, path, content in fts_rows:
+            # Fuzzy-Score für Relevanz
             score_name = fuzz.WRatio(query.lower(), filename.lower())
-            
-            # Content-Check: Wir nehmen Content (falls snippet zu kurz ist)
-            # Begrenzung auf die ersten 5000 Zeichen für Performance
             check_content = content[:5000] if content else ""
             score_content = fuzz.partial_token_set_ratio(query.lower(), check_content.lower())
-            
-            # Gewichteter Durchschnitt: Inhalt ist wichtiger als Dateiname
-            final_score = (score_name * 0.2) + (score_content * 0.8)
-            
-            # Bonus für exakte Wort-Treffer (jetzt stärker)
+            fuzzy_score = (score_name * 0.2) + (score_content * 0.8)
+
+            # Bonus für exakte Wort-Treffer
             if all(w.lower() in (filename + check_content).lower() for w in words):
-                final_score += 20
+                fuzzy_score += 20
             
-            # Filter: Nur anzeigen, wenn Score halbwegs okay ist
-            # Bei "vertraaag" vs "vertrag" ist der Score meist > 70
-            if final_score > 55:
-                scored_results.append({
-                    "score": final_score,
-                    "data": (filename, path, snippet)
-                })
-
-        # 4. Sortieren
-        scored_results.sort(key=lambda x: x["score"], reverse=True)
-
-        return [item["data"] for item in scored_results[:50]]
+            # Wenn das Dokument bereits durch die semantische Suche gefunden wurde,
+            # geben wir einen massiven Bonus. Ansonsten normaler Score.
+            if doc_id in combined_scores:
+                combined_scores[doc_id] += fuzzy_score + 50 # Bonus!
+            else:
+                combined_scores[doc_id] = fuzzy_score
+        
+        # --- PHASE 4: SORTIEREN & ERGEBNISSE HOLEN ---
+        # Sortiere die doc_ids nach dem höchsten Score
+        sorted_doc_ids = sorted(combined_scores.keys(), key=lambda doc_id: combined_scores[doc_id], reverse=True)
+        
+        # Top 50 Ergebnisse
+        final_results = []
+        for doc_id in sorted_doc_ids[:50]:
+            # Holen der Metadaten für die Anzeige
+            res = cursor.execute(
+                "SELECT filename, path, snippet(documents, 2, '<b>', '</b>', '...', 15) FROM documents WHERE rowid = ?", 
+                (doc_id,)
+            ).fetchone()
+            
+            if res:
+                final_results.append(res)
+        
+        conn.close()
+        return final_results
 
 # --- 2. INDEXER (Unverändert) ---
 
@@ -154,10 +201,11 @@ class IndexerThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int, int, bool)
 
-    def __init__(self, folder_path, db_name="uff_index.db"):
+    def __init__(self, folder_path, db_name, model):
         super().__init__()
         self.folder_path = folder_path
         self.db_name = db_name
+        self.model = model
         self.is_running = True
 
     def stop(self):
@@ -182,8 +230,17 @@ class IndexerThread(QThread):
 
     def run(self):
         conn = sqlite3.connect(self.db_name)
-        conn.execute("DELETE FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
-        conn.commit()
+        cursor = conn.cursor()
+        
+        # Finde alle doc_ids, die zu dem Ordner gehören, um sie später zu löschen
+        cursor.execute("SELECT rowid FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
+        ids_to_delete = [row[0] for row in cursor.fetchall()]
+        
+        if ids_to_delete:
+            # Lösche alte Einträge aus 'documents' und 'embeddings'
+            cursor.execute("DELETE FROM documents WHERE path LIKE ?", (f"{self.folder_path}%",))
+            cursor.execute(f"DELETE FROM embeddings WHERE doc_id IN ({','.join('?'*len(ids_to_delete))})", ids_to_delete)
+            conn.commit()
 
         indexed = 0
         skipped = 0
@@ -203,10 +260,20 @@ class IndexerThread(QThread):
                 content = self._extract_text(path)
                 
                 if content and len(content.strip()) > 0:
-                    conn.execute(
+                    # 1. In FTS-Tabelle einfügen
+                    cursor.execute(
                         "INSERT INTO documents (filename, path, content) VALUES (?, ?, ?)", 
                         (file, path, content)
                     )
+                    doc_id = cursor.lastrowid
+                    
+                    # 2. Embedding erstellen und in BLOB umwandeln
+                    embedding = self.model.encode(content[:8192], convert_to_tensor=False)
+                    embedding_blob = embedding.tobytes()
+                    
+                    # 3. Embedding in Tabelle einfügen
+                    cursor.execute("INSERT INTO embeddings (doc_id, vec) VALUES (?, ?)", (doc_id, embedding_blob))
+                    
                     indexed += 1
                 else:
                     skipped += 1
@@ -227,13 +294,14 @@ class UffWindow(QMainWindow):
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Text Search v3.0 (Fuzzy)")
+        self.setWindowTitle("UFF Text Search v4.0 (Semantic)")
         self.resize(1000, 700)
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
+        # ... (UI initialisation remains the same)
         # LINKS
         left_panel = QFrame()
         left_panel.setFixedWidth(250)
@@ -274,7 +342,7 @@ class UffWindow(QMainWindow):
 
         search_container = QHBoxLayout()
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("Suchbegriff... (Fuzzy aktiv)")
+        self.input_search.setPlaceholderText("Suchbegriff... (Semantische Suche aktiv)")
         self.input_search.returnPressed.connect(self.perform_search)
         self.input_search.setStyleSheet("padding: 8px; font-size: 14px;")
         
@@ -285,7 +353,7 @@ class UffWindow(QMainWindow):
         search_container.addWidget(self.input_search)
         search_container.addWidget(btn_go)
 
-        self.lbl_status = QLabel("Bereit.")
+        self.lbl_status = QLabel("Bereit. Semantisches Modell geladen.")
         self.lbl_status.setStyleSheet("color: #666;")
         self.progress_bar = QProgressBar()
         self.progress_bar.hide()
@@ -306,6 +374,8 @@ class UffWindow(QMainWindow):
         splitter.setSizes([250, 750])
 
         main_layout.addWidget(splitter)
+    
+    # ... (Rest of UI Class)
 
     # LOGIK
     def load_saved_folders(self):
@@ -347,10 +417,8 @@ class UffWindow(QMainWindow):
         self.set_ui_busy(True)
         self.lbl_status.setText(f"Starte... {os.path.basename(folder)}")
         
-        # HIER WAR DER FEHLER:
-        # Wir müssen dem Thread explizit sagen, wo die Datenbank liegt!
-        # self.db.db_name enthält den korrekten Pfad (C:\Users\...\AppData\...)
-        self.indexer_thread = IndexerThread(folder, db_name=self.db.db_name)
+        # Dem Thread jetzt das Modell mitgeben
+        self.indexer_thread = IndexerThread(folder, db_name=self.db.db_name, model=self.db.model)
         
         self.indexer_thread.progress_signal.connect(lambda msg: self.lbl_status.setText(msg))
         self.indexer_thread.finished_signal.connect(self.indexing_finished)
