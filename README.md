@@ -30,9 +30,6 @@ A hybrid scoring system ranks the results, giving you the best of both worlds.
 
 ## Installation
 
-### Windows Installer
-A pre-built installer (`UFF_Search_Installer_v3.exe`) is available for easy installation. This is the recommended method for most users.
-
 ### From Source
 To run the application from the source code, you'll need Python 3.
 
