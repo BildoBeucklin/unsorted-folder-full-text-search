@@ -7,6 +7,12 @@ import zipfile
 import io       
 import traceback
 
+# NEU: Word Support
+try:
+    import docx
+except ImportError:
+    docx = None  # Fallback, falls nicht installiert
+
 from sentence_transformers import SentenceTransformer, util
 from rapidfuzz import process, fuzz
 
@@ -48,6 +54,10 @@ sys.stderr = sys.stdout
 print(f"--- START LOGGING ---")
 print(f"Logfile: {log_file_path}")
 
+# Check ob docx installiert ist und warnen im Log
+if docx is None:
+    print("WARNUNG: 'python-docx' ist nicht installiert. .docx Dateien werden ignoriert.")
+
 def qt_message_handler(mode, context, message):
     msg_lower = message.lower()
     ignore_keywords = [
@@ -73,7 +83,6 @@ class SearchResultItem(QFrame):
         super().__init__(parent)
         self.filepath = filepath
         
-        # Optik der Karte
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet("""
             SearchResultItem {
@@ -91,7 +100,7 @@ class SearchResultItem(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # 1. Dateiname (Sieht aus wie ein Link, ist aber ein Button)
+        # 1. Dateiname
         self.btn_title = QPushButton(filename)
         self.btn_title.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_title.setStyleSheet("""
@@ -109,13 +118,12 @@ class SearchResultItem(QFrame):
         """)
         self.btn_title.clicked.connect(self.open_file)
         
-        # 2. Snippet (Textvorschau)
-        # Wir nutzen QLabel mit WordWrap. HTML für Fettung ist okay.
+        # 2. Snippet
         self.lbl_snippet = QLabel(snippet)
         self.lbl_snippet.setWordWrap(True)
         self.lbl_snippet.setStyleSheet("color: #444; font-size: 10pt; margin-top: 5px;")
         
-        # 3. Pfad (Grau und klein)
+        # 3. Pfad
         self.lbl_path = QLabel(filepath)
         self.lbl_path.setStyleSheet("color: #888; font-size: 8pt; margin-top: 5px;")
         
@@ -124,19 +132,13 @@ class SearchResultItem(QFrame):
         layout.addWidget(self.lbl_path)
     
     def open_file(self):
-        """
-        Öffnet die Datei direkt über QDesktopServices.
-        """
         print(f"Öffne Datei: {self.filepath}")
-        
         target_path = self.filepath
-        # Falls es ein ZIP-Pfad ist (erkennbar am Trenner " :: ")
         if " :: " in target_path:
             target_path = target_path.split(" :: ")[0]
         
         url = QUrl.fromLocalFile(target_path)
         success = QDesktopServices.openUrl(url)
-        
         if not success:
             print("Fehler: Konnte Datei nicht öffnen.")
 
@@ -267,12 +269,25 @@ class IndexerThread(QThread):
         ext = os.path.splitext(filename)[1].lower()
         text = ""
         try:
+            # --- PDF ---
             if ext == ".pdf":
                 try:
                     with pdfplumber.open(stream) as pdf:
                         for p in pdf.pages:
                             if t := p.extract_text(): text += t + "\n"
                 except: pass
+            
+            # --- WORD / DOCX ---
+            elif ext == ".docx" and docx is not None:
+                try:
+                    # python-docx kann file-like objects (BytesIO oder file) lesen
+                    doc = docx.Document(stream)
+                    for para in doc.paragraphs:
+                        text += para.text + "\n"
+                except Exception as e:
+                    print(f"Docx Error {filename}: {e}")
+
+            # --- PLAIN TEXT ---
             elif ext in [".txt", ".md", ".py", ".json", ".csv", ".html", ".log", ".ini", ".xml"]:
                 try:
                     content = stream.read()
@@ -347,7 +362,7 @@ class UffWindow(QMainWindow):
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Search v6.0 (Widget List)")
+        self.setWindowTitle("UFF Search")
         self.resize(1000, 700)
         central = QWidget()
         self.setCentralWidget(central)
@@ -458,7 +473,7 @@ class UffWindow(QMainWindow):
         if not query: return
         
         self.lbl_status.setText("Suche läuft...")
-        QApplication.processEvents() # UI Update erzwingen
+        QApplication.processEvents() 
 
         # 1. Alte Ergebnisse löschen
         while self.results_layout.count():
@@ -481,7 +496,6 @@ class UffWindow(QMainWindow):
                 item = SearchResultItem(fname, fpath, snippet)
                 self.results_layout.addWidget(item)
         
-        # Stretch am Ende, damit alles oben bleibt
         self.results_layout.addStretch()
 
     # --- Folder Management ---
