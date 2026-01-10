@@ -7,7 +7,7 @@ from PyQt6.QtGui import QPixmap, QFont, QIcon
 from PyQt6.QtCore import qInstallMessageHandler, QTimer, Qt
 
 # Config zuerst!
-from config import qt_message_handler, LOG_FILE
+from config import qt_message_handler, LOG_FILE, resource_path
 
 from ui import UffWindow, ModernSplashScreen, ModelLoaderThread
 
@@ -19,15 +19,14 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
         app.setFont(QFont("Segoe UI", 10))
 
-        # 1. ICON SETZEN (Für die ganze App)
-        # Wenn assets/icon.png existiert, wird es genutzt.
-        if os.path.exists("assets/icon.png"):
-            app_icon = QIcon("assets/icon.png")
+        icon_path = resource_path("assets/uff_icon.jpeg") # <--- HIER
+        if os.path.exists(icon_path):
+            app_icon = QIcon(icon_path)
             app.setWindowIcon(app_icon)
         
-        # 2. SPLASH SCREEN ERSTELLEN
-        splash_pix = QPixmap("assets/uff_banner.jpeg")
-        # Falls kein Bild da ist, nehmen wir ein leeres (damit es nicht crasht)
+        # SPLASH LADEN (Mit resource_path)
+        banner_path = resource_path("assets/uff_banner.jpeg")
+        splash_pix = QPixmap(banner_path)
         if splash_pix.isNull():
             splash_pix = QPixmap(600, 400)
             splash_pix.fill(Qt.GlobalColor.white)
@@ -35,8 +34,6 @@ if __name__ == "__main__":
         splash = ModernSplashScreen(splash_pix)
         splash.show()
 
-        # 3. LADEN SIMULIEREN & STARTEN
-        # Wir nutzen einen kleinen Trick, um den Start visuell zu "begleiten"
         
         splash.set_progress(10, "Lade Konfiguration...")
         app.processEvents()

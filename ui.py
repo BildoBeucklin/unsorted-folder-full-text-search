@@ -1,6 +1,6 @@
 # ui.py
 import os
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLineEdit, QPushButton, QLabel, QFileDialog, 
                              QProgressBar, QMessageBox, QListWidget, QListWidgetItem, 
                              QSplitter, QFrame, QScrollArea, QStyle, QGraphicsDropShadowEffect,
@@ -133,10 +133,7 @@ class UffWindow(QMainWindow):
         self.db = DatabaseHandler()
         self.initUI()
         
-        # NEU: Icon setzen
-        if os.path.exists("assets/uff_icon.jpeg"):
-            self.setWindowIcon(QIcon("assets/uff_icon.jpeg"))
-        
+       
         self.load_saved_folders()
 
     def initUI(self):

@@ -2,10 +2,6 @@
 
 # UFF Search - Unsorted Folder Full-Text Search
 
-![GitHub stars](https://img.shields.io/github/stars/BildoBeucklin/unsorted-folder-full-text-search?style=social)
-![GitHub forks](https://img.shields.io/github/forks/BildoBeucklin/unsorted-folder-full-text-search?style=social)
-![GitHub license](https://img.shields.io/github/license/BildoBeucklin/unsorted-folder-full-text-search)
-
 UFF Search is a powerful desktop application for Windows that allows you to perform fast, intelligent, and fuzzy full-text searches on your local files, including searching inside ZIP archives.
 
 It builds a local search index for the folders you specify, allowing you to quickly find documents based on their meaning (semantic search) and specific keywords, even with typos in your search query.
@@ -68,12 +64,18 @@ To create a standalone executable from the source code, you can use `pyinstaller
 
 2.  **Build the executable:**
     ```bash
-    pyinstaller --name "UFF_Search" --windowed --onefile --icon="favicon.ico" --add-data "assets;assets" main.py
+    pyinstaller --noconfirm --onedir --windowed --add-data "assets;assets" --icon "assets/favicon.ico" main.py
     ```
-This command will create a single executable file in the `dist` folder.
+    Or:
+    ```bash
+    pyinstaller main.spec
+    ```
+    
+Both of these commands will create a single executable file in the `dist` folder. It may take some time to build.
+
 
 ## Usage
-
+(texts are only in german)
 1.  Start the application.
 2.  Click **" + Hinzufügen"** (Add) to select a folder you want to index. The application will start scanning it immediately.
 3.  Once indexing is complete, type your search query into the search bar and press Enter or click **"Suchen"** (Search).
@@ -94,6 +96,7 @@ This command will create a single executable file in the `dist` folder.
     *   `openpyxl` for `.xlsx` files.
     *   `python-pptx` for `.pptx` files.
 *   **Index Location:** The search index database (`uff_index.db`) is stored in `%LOCALAPPDATA%\UFF_Search` on Windows.
+* **Size:** (ca. 400-600 MB)
 
 ## License
 

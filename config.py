@@ -15,22 +15,32 @@ if not os.path.exists(APP_DATA_DIR):
 DB_NAME = os.path.join(APP_DATA_DIR, "uff_index.db")
 LOG_FILE = os.path.join(APP_DATA_DIR, "uff.log")
 
+def resource_path(relative_path):
+    """ 
+    Holt den absoluten Pfad zu Ressourcen.
+    Funktioniert für Dev-Modus UND für PyInstaller EXE (_MEIPASS).
+    """
+    try:
+        # PyInstaller erstellt temporären Ordner _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 # --- LOGGING KLASSE ---
 class Logger(object):
     def __init__(self):
-        # "w" überschreibt bei jedem Start. Nutze "a" für anhängen (append).
-        self.terminal = sys.stdout # Optional: Falls du es AUCH im Terminal sehen willst
+        self.terminal = sys.stdout
         self.log = open(LOG_FILE, "w", encoding="utf-8")
 
     def write(self, message):
-        # Optional: ins Terminal schreiben (auskommentieren, wenn du nur Logfile willst)
-        # self.terminal.write(message) 
+
         
         self.log.write(message)
         self.log.flush()
 
     def flush(self):
-        # self.terminal.flush()
         self.log.flush()
 
 # --- AKTIVIERUNG DES LOGGERS ---
