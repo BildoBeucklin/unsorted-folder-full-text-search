@@ -85,7 +85,7 @@ class UffWindow(QMainWindow):
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Search v8.0 (Modular)")
+        self.setWindowTitle("UFF Search")
         self.resize(1100, 750)
         self.setStyleSheet(STYLESHEET)
         
