@@ -1,26 +1,76 @@
 # ui.py
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+import os
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLineEdit, QPushButton, QLabel, QFileDialog, 
                              QProgressBar, QMessageBox, QListWidget, QListWidgetItem, 
-                             QSplitter, QFrame, QScrollArea, QStyle, QGraphicsDropShadowEffect)
-from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QColor, QFont
+                             QSplitter, QFrame, QScrollArea, QStyle, QGraphicsDropShadowEffect,
+                             QSplashScreen) # QSplashScreen hier wichtig
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QRect
+from PyQt6.QtGui import QDesktopServices, QColor, QFont, QPainter, QIcon, QPixmap # Painter & Icon neu
 from sentence_transformers import SentenceTransformer
 
 from database import DatabaseHandler
 from indexer import IndexerThread
 from config import STYLESHEET
 
-# Thread zum Laden des Modells (UI-Helper)
+# --- NEU: Ein moderner Splash Screen mit Ladebalken ---
+class ModernSplashScreen(QSplashScreen):
+    def __init__(self, pixmap):
+        super().__init__(pixmap)
+        self.progress = 0
+        self.message = "Initialisiere..."
+        # Schriftart für den Ladetext
+        self.font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+
+    def set_progress(self, value, text):
+        self.progress = value
+        self.message = text
+        self.repaint() # Erzwingt neuzeichnen
+
+    def drawContents(self, painter):
+        # 1. Das normale Bild zeichnen
+        super().drawContents(painter)
+
+        # 2. Ladebalken-Hintergrund (unten)
+        # Wir malen direkt auf das Bild
+        bg_rect = self.rect()
+        bar_height = 20
+        # Position: Ganz unten am Bild
+        bar_rect = QRect(0, bg_rect.height() - bar_height, bg_rect.width(), bar_height)
+        
+        # Hintergrund des Balkens (dunkelgrau)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(50, 50, 50))
+        painter.drawRect(bar_rect)
+
+        # 3. Der Fortschritt (türkis/blau)
+        # Breite basierend auf % berechnen
+        progress_width = int(bg_rect.width() * (self.progress / 100))
+        prog_rect = QRect(0, bg_rect.height() - bar_height, progress_width, bar_height)
+        
+        painter.setBrush(QColor("#3498db")) # UFF-Blau
+        painter.drawRect(prog_rect)
+
+        # 4. Text zeichnen (zentriert über dem Balken oder darin)
+        painter.setPen(QColor("white"))
+        painter.setFont(self.font)
+        # Text etwas oberhalb des Balkens zeichnen
+        text_rect = QRect(0, bg_rect.height() - bar_height - 30, bg_rect.width(), 25)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.message)
+
+# --- Thread zum Laden des Modells ---
 class ModelLoaderThread(QThread):
     model_loaded = pyqtSignal(object)
+    
     def run(self):
         try:
+            # Das ist der schwere Teil, der dauert
             model = SentenceTransformer('all-MiniLM-L6-v2')
             self.model_loaded.emit(model)
-        except: self.model_loaded.emit(None)
+        except: 
+            self.model_loaded.emit(None)
 
-# Widget für einzelne Ergebnisse
+# --- SearchResultItem (Unverändert, aber der Vollständigkeit halber hier) ---
 class SearchResultItem(QFrame):
     def __init__(self, filename, filepath, snippet, parent=None):
         super().__init__(parent)
@@ -76,16 +126,21 @@ class SearchResultItem(QFrame):
         target = self.filepath.split(" :: ")[0] if " :: " in self.filepath else self.filepath
         QDesktopServices.openUrl(QUrl.fromLocalFile(target))
 
+# --- Das Hauptfenster ---
 class UffWindow(QMainWindow):
-    def __init__(self, splash=None):
+    def __init__(self):
         super().__init__()
-        self.splash = splash
         self.db = DatabaseHandler()
         self.initUI()
+        
+        # NEU: Icon setzen
+        if os.path.exists("assets/uff_icon.jpeg"):
+            self.setWindowIcon(QIcon("assets/uff_icon.jpeg"))
+        
         self.load_saved_folders()
 
     def initUI(self):
-        self.setWindowTitle("UFF Search")
+        self.setWindowTitle("UFF Search v1.0")
         self.resize(1100, 750)
         self.setStyleSheet(STYLESHEET)
         
@@ -158,7 +213,7 @@ class UffWindow(QMainWindow):
         search_box.addWidget(self.btn_go)
 
         status_box = QHBoxLayout()
-        self.lbl_status = QLabel("Modell wird geladen...")
+        self.lbl_status = QLabel("Bereit.")
         self.lbl_status.setObjectName("StatusLabel")
         self.prog = QProgressBar()
         self.prog.hide()
@@ -186,15 +241,9 @@ class UffWindow(QMainWindow):
         self.input.setEnabled(enabled)
         self.btn_go.setEnabled(enabled)
         self.folder_list.setEnabled(enabled)
-
-    def start_model_loading(self):
-        if self.splash: self.splash.showMessage("Lade KI-Modell...", Qt.AlignmentFlag.AlignBottom, Qt.GlobalColor.white)
-        self.loader = ModelLoaderThread()
-        self.loader.model_loaded.connect(self.on_model_loaded)
-        self.loader.start()
-
+    
+    # Methoden für Model Loading (wird jetzt von main gesteuert)
     def on_model_loaded(self, model):
-        if self.splash: self.splash.finish(self)
         if not model:
             QMessageBox.critical(self, "Fehler", "Modell konnte nicht geladen werden.")
             return
@@ -202,6 +251,10 @@ class UffWindow(QMainWindow):
         self.lbl_status.setText("Bereit für deine Suche.")
         self.set_ui_enabled(True)
 
+    # ... RESTLICHE METHODEN (search, add_folder etc.) bleiben gleich wie vorher ...
+    # (Kopiere hier einfach die Methoden aus deiner alten ui.py rein, 
+    # search, load_saved_folders, add_new_folder, delete_selected_folder, rescan, start_idx, cancel_idx, idx_done)
+    
     def search(self):
         query = self.input.text()
         if not query: return
