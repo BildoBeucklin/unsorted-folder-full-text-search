@@ -1,6 +1,10 @@
-![UFF Banner](assets/uff_banner.jpeg)
+[![UFF Banner](assets/uff_banner.jpeg)](https://github.com/BildoBeucklin/unsorted-folder-full-text-search)
 
 # UFF Search - Unsorted Folder Full-Text Search
+
+![GitHub stars](https://img.shields.io/github/stars/BildoBeucklin/unsorted-folder-full-text-search?style=social)
+![GitHub forks](https://img.shields.io/github/forks/BildoBeucklin/unsorted-folder-full-text-search?style=social)
+![GitHub license](https://img.shields.io/github/license/BildoBeucklin/unsorted-folder-full-text-search)
 
 UFF Search is a powerful desktop application for Windows that allows you to perform fast, intelligent, and fuzzy full-text searches on your local files, including searching inside ZIP archives.
 
@@ -13,6 +17,7 @@ It builds a local search index for the folders you specify, allowing you to quic
 *   **Fuzzy Search:** Finds relevant files even if your search term has typos, powered by `rapidfuzz`.
 *   **Wide File Type Support:** Extracts text from:
     *   PDFs (`.pdf`)
+    *   Microsoft Office (`.docx`, `.xlsx`, `.pptx`)
     *   Plain text formats (`.txt`, `.md`, `.py`, `.json`, `.csv`, `.html`, `.log`, `.ini`, `.xml`)
 *   **Simple UI:** An easy-to-use interface to manage your indexed folders and view search results.
 *   **Click to Open:** Search results can be clicked to open the file directly (or the containing ZIP archive).
@@ -33,14 +38,13 @@ A hybrid scoring system ranks the results, giving you the best of both worlds.
 A pre-built installer (`UFF_Search_Installer_v3.exe`) is available for easy installation. This is the recommended method for most users.
 
 ### From Source
-To run the application from the source code, you'll need Python 3 and the following dependencies:
+To run the application from the source code, you'll need Python 3.
 
 1.  **Clone the repository:**
     ```bash
     git clone https://github.com/BildoBeucklin/unsorted-folder-full-text-search.git
     cd unsorted-folder-full-text-search
     ```
-    *(Note: You might need to update the repository URL)*
 
 2.  **Install dependencies:**
     It is highly recommended to use a virtual environment.
@@ -50,8 +54,23 @@ To run the application from the source code, you'll need Python 3 and the follow
 
 3.  **Run the application:**
     ```bash
-    python uff_app.py
+    python main.py
     ```
+
+## Building from Source
+
+To create a standalone executable from the source code, you can use `pyinstaller`:
+
+1.  **Install PyInstaller:**
+    ```bash
+    pip install pyinstaller
+    ```
+
+2.  **Build the executable:**
+    ```bash
+    pyinstaller --name "UFF_Search" --windowed --onefile --icon="favicon.ico" --add-data "assets;assets" main.py
+    ```
+This command will create a single executable file in the `dist` folder.
 
 ## Usage
 
@@ -69,9 +88,14 @@ To run the application from the source code, you'll need Python 3 and the follow
 *   **Search Technology:**
     *   `sentence-transformers` (specifically `all-MiniLM-L6-v2`) for semantic search.
     *   `rapidfuzz` for fuzzy string matching.
-*   **File Processing:** `pdfplumber` for PDF text extraction.
+*   **File Processing:** 
+    *   `pdfplumber` for PDF text extraction.
+    *   `python-docx` for `.docx` files.
+    *   `openpyxl` for `.xlsx` files.
+    *   `python-pptx` for `.pptx` files.
 *   **Index Location:** The search index database (`uff_index.db`) is stored in `%LOCALAPPDATA%\UFF_Search` on Windows.
 
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+This license requires that if you use this software in a product or service that is accessed over a network, you must also make the source code available to the users of that product or service.

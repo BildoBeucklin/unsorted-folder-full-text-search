@@ -18,14 +18,29 @@ LOG_FILE = os.path.join(APP_DATA_DIR, "uff.log")
 # --- LOGGING KLASSE ---
 class Logger(object):
     def __init__(self):
+        # "w" überschreibt bei jedem Start. Nutze "a" für anhängen (append).
+        self.terminal = sys.stdout # Optional: Falls du es AUCH im Terminal sehen willst
         self.log = open(LOG_FILE, "w", encoding="utf-8")
 
     def write(self, message):
+        # Optional: ins Terminal schreiben (auskommentieren, wenn du nur Logfile willst)
+        # self.terminal.write(message) 
+        
         self.log.write(message)
         self.log.flush()
 
     def flush(self):
+        # self.terminal.flush()
         self.log.flush()
+
+# --- AKTIVIERUNG DES LOGGERS ---
+# Das passiert jetzt sofort beim Import dieser Datei!
+sys.stdout = Logger()
+sys.stderr = sys.stdout # Fehler auch ins Log umleiten
+
+print(f"--- LOGGER START ---")
+print(f"Logfile: {LOG_FILE}")
+
 
 # --- QT MESSAGE HANDLER (Filter) ---
 def qt_message_handler(mode, context, message):
