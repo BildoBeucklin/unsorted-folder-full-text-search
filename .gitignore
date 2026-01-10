@@ -3,3 +3,6 @@
 /dist
 /build
 __pycache__/
+*.iss
+UFF-Search.spec
+/Output
