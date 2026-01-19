@@ -46,7 +46,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='UFF_Search',  # Name der Datei (UFF_Search.exe)
+    name='UFFSearch',  # Name der Datei (UFFSearch.exe)
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -68,5 +68,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='UFF_Search', # Name des Ordners
+    name='UFFSearch', # Name des Ordners
 )

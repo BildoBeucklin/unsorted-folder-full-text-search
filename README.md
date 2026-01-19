@@ -99,3 +99,7 @@ Both of these commands will create a single executable file in the `dist` folder
 
 This project is licensed under the GNU Affero General Public License v3.0. See the [LICENSE](LICENSE) file for details.
 This license requires that if you use this software in a product or service that is accessed over a network, you must also make the source code available to the users of that product or service.
+
+## Contact & Support
+
+You can contact me at: https://rossmann-it-solutions.de/contact/
