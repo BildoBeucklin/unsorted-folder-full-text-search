@@ -1,4 +1,4 @@
-Maintend here(https://git.rossmann-it-solutions.de/intern/unsorted-folder-full-text-search) (since: 31.01.2026)
+Maintend here: (https://git.rossmann-it-solutions.de/intern/unsorted-folder-full-text-search) (since: 31.01.2026)
 
 [![UFF Banner](assets/uff_banner.jpeg)](https://github.com/BildoBeucklin/unsorted-folder-full-text-search)
 
